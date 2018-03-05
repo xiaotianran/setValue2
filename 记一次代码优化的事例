@@ -1,0 +1,465 @@
+记一次代码优化的事例
+
+
+业务场景：
+
+销售单表sales： salesId(主键) customerName(客户信息)
+销售单明细表sales_detail：salesDetailId(明细主键) salesId(主表主键) num(销售数量),partsId(配件id)
+配件信息表parts表:partsId(主键) partsCode(配件编号) partsName(配件名称)
+
+业务需求
+需要展示明细，展示的格式
+配件编号 配件名称 销售数量 客户信息
+ResultDTO{
+	partsName,
+	partsCode,
+	num,
+	customerName
+}
+
+
+
+第一种实现方案：
+直接sales,sales_detail,partsId三个表联合查询
+优点：看不出来
+缺点：多表关联同病，性能不好
+
+第二种实现方案：
+先从sales_detail出发，根据partsId 和salesId去填充其他值
+ResultDTO1{
+	salesDetailId,
+	partsId,
+	salesId,
+	partsName,
+	partsCode,
+	num,
+	customerName
+}
+
+伪代码如下：
+List<ResultDTO> resultList;
+//1.1从resultList获取所有的salesId
+resultList-->List<Integer> salesIdList;
+//1.2从salesIdList获取SalesDTO
+SalesDAO.findByIdList -->SalesDTOList
+//1.3alesDTOList转换成Map
+SalesDTOList --> Map<Integer,SalesDTO> 
+//1.4遍历resultList 填充值
+resultList.foreach(setSalesMethod)
+
+
+同理设置配件信息的时候也会经过以上几步
+resultList-->List<Integer> partsIdList;
+PartDAO.findByIdList -->PartsDTOList
+PartsDTOList --> Map<Interger,PartsDTO>
+resultList.foreach(setPartsMethod)
+
+目前我所在的项目绝大部分的内容都是按照这些步骤去填充值
+
+思考的时候到了，为什么这些标准的流程要重复的写。
+软件工程大部分的工作就是消除重复！！！
+
+现在来看如何减少重复：
+
+2.1减少重复的第一个尝试：
+为每个service提供方法
+Map<Integer,T> getId2TMap(List<Integer> IdList)
+
+很好，这种方法封装了1.2和1.3的步骤
+这样封装后
+我们fillValues的伪代码就变成这样子了
+
+//2.1从resultList获取所有的salesId
+resultList-->List<Integer> salesIdList;
+//2.2调用service获取Map<Integer,ResultDTO>
+salesIdList-->Map<Integer,ResultDTO>
+//2.3遍历resultList 填充值
+resultList.foreach(setSalesProcess)
+
+
+2.2现在我们在来看下刚刚减少重复使用的方法-->把紧闭相关的两个步骤合成一个
+于是我们就会出现了
+ASerivce#getId2DTOMap;
+BSerivce#getId2DTOMap;
+....
+
+于是下面出现了第二个业务
+
+需要展示明细，展示的格式
+配件编号 配件名称 销售数量 
+ResultDTO2{
+	salesDetailId,
+	partsId,
+	partsName,
+	partsCode,
+	num,
+}
+于是你就会按照之前的方法
+业务二伪代码：
+List<ResultDTO2>-->List<Integer> partsIdList;
+PartsService#getId2DTOMap.apply(partsIdList)-->Map<Integer,ResultDTO>  
+resultList.foreach(setPartsProcess)
+
+对比下
+业务一设置配件信息的伪代码
+List<ResultDTO1>-->List<Integer> partsIdList;
+PartsService#getId2DTOMap.apply(partsIdList)-->Map<Integer,ResultDTO>  
+resultList.foreach(setPartsProcess)
+
+你会发现这两段伪代码就是一样的，除了两个返回值的类型一样，这个时候你可能会说一句卧槽这什么鬼业务。
+但是我们仔细想一想这是正常的业务，因为我们的习惯是在每个表去冗余一些其他的表的主键。这样A存B的信息,
+C存B的信息，这种场景就很容易出现了。
+吐槽完业务我们还是回到我们伟大的代码去重的奋斗去吧。
+
+这里的业务理解起来是要有一定的抽象能力。
+为什么业务一和业务二的方法不能写成同一个方法里面？
+因为一和二业务的获取partsIdList的对象不一致
+
+如何解决不一致问题？
+当然是泛型了
+
+于是我们知道最后
+业务一业务二的实现应该写成如下的格式
+T void  setPartsValue(List<T> targetList){
+	
+}
+
+那么如何解决不一样的类获取id的方法不一致的问题呢？
+
+如果是java8之前，这个问题我们只能通过反射去解决
+具体的方案是提供一种策略
+反射获取和设置值参考以下链接：
+http://blog.csdn.net/qincidong/article/details/6715841
+伪代码：
+
+if(T instance of ClassA){
+	getIdofClassByReflection(ClassA)
+}
+if(T instance of ClassB){
+	getIdofClassByReflection(ClassB)
+}
+
+即使按照我们刚刚定的策略模式我们依然需要分别为每个类提供根据反射获取Id的方法
+和根据反射设置value的方法
+这样的代码除了反射的性能不好之外，侵入性太强,关于反射实现的方案各位有兴趣可以自己去实现看。
+
+下面就轮到java8出场了
+下面的实现方案包含了java8的新特性中的
+函数式编程
+stream Api
+接口默认方法
+
+我们再来看下
+业务二
+List<ResultDTO2>-->List<Integer> partsIdList;
+PartsService#getId2DTOMap.apply(partsIdList)-->Map<Integer,ResultDTO>  
+resultList.foreach(setPartsProcess)
+
+业务一
+List<ResultDTO1>-->List<Integer> partsIdList;
+PartsService#getId2DTOMap.apply(partsIdList)-->Map<Integer,ResultDTO>  
+resultList.foreach(setPartsProcess)
+
+的伪代码，假如我们要定义成同一个方法，以上不可变的地方只有
+PartsService#getId2DTOMap.apply(partsIdList)-->Map<Integer,ResultDTO>  
+resultList.foreach
+需要变动的值有
+1、List<T> tagetList;
+2、从tagetList获取Id的方法
+3、为tagetList设置值的方法setPartsProcess
+第四点之前没有提到
+
+
+先看抽象之后的方法
+方法一：循环sourceList
+public static <S, K, T> void anyToAny(Collection<S> sourceList, 
+                                      Function<S, K> getIdList4SourceIdList, 
+                                      Map<K, List<T>> detailMap, 
+                                      BiConsumer<S, List<T>> action) {
+    for (S s : sourceList) {
+        K key = getIdList4SourceIdList.apply(s);
+        Collection<T> details = detailMap.get(key);
+        if (details != null && details.size() > 0) {
+            action.accept(s, Lists.newArrayList(details));
+        }
+    }
+}
+
+方法二：循环targetList
+public static <S, K, T> void anyToAny2(Collection<T> targetList,
+                                      Function<T, K> getIdFromTargetList,
+                                      Map<K, S> Id2SourceDTOList,
+                                      BiConsumer<S, T> action) {
+
+    targetList.stream().filter(t->{
+        K IdFromTarget = getIdFromTargetList.apply(t);
+        return Id2SourceDTOList.containsKey(IdFromTarget);
+    }).forEach(t->{
+        K IdFromTarget = getIdFromTargetList.apply(t);
+        S s = Id2SourceDTOList.get(IdFromTarget);
+        action.accept(s,t);
+    });
+}
+
+
+比较之后方法一的性能更好
+
+于是我们得出了一个通用的setVuale的utils
+
+
+通过
+PartsService#setPartsInfoByPartsId
+
+ <T> void setPartsInfoByPartsId(List<T> targetList, SafeFunction<T, Integer> getMethod, BiConsumer<PartsDTO, List<T>> setValueMethod);
+
+其实现伪代码：
+//1、从sourceDTOList根据getMethod获取idList
+targetList+getMethod-->IdList
+//2、根据idList获取sourceDTOList
+IdList->sourceDTOList
+//3调用我们刚刚展示过的anyToAny方法
+any2any-->done
+
+于是我们通过定义了一个抽象的，也可以成为函数式的操作，完成了最原始的操作的1.1->1.4
+
+
+
+//1.1从resultList获取所有的salesId
+resultList-->List<Integer> salesIdList;
+//1.2从salesIdList获取SalesDTO
+SalesDAO.findByIdList -->SalesDTOList
+//1.3alesDTOList转换成Map
+SalesDTOList --> Map<Integer,SalesDTO> 
+//1.4遍历resultList 填充值
+resultList.foreach(setSalesMethod)
+
+现在我们可以愉快的开始设置各种各样的fillValue了
+
+
+但是你很快就会发现有如下几个service
+
+serviceA#setvalueById
+serviceB#setvalueById
+serviceC#setvalueById
+
+这并没有什么问题，但是如果我们在关注其实现方法。
+我们好像转了一圈又回到原点了
+
+//1、从sourceDTOList根据getMethod获取idList
+targetList+getMethod-->IdList
+//2、根据idList获取sourceDTOList
+IdList->sourceDTOList
+//3调用我们刚刚展示过的anyToAny方法
+any2any-->done
+
+每个service的实现除了2的步骤不一样，1和3步骤都保持一致。虽然说程序员的活都是撸起袖子复制粘贴
+但是每次都要去找复制也是很烦啊
+
+
+
+
+于是我们这里会不会想到接口概念，接口代表了一个类是否拥有某种能力！！
+先给我们这个接口起个名字SetValuable
+相同的步骤 1跟 2
+不相同的步骤，我们定义一个抽象方法，让接口实现方去提供
+于是就有了下面的代码
+
+
+interface SetValuable<S>{
+  
+ 
+  default void doProcess<T> (List<T> targetList,
+                            SafeFunction<T, Integer> getIdMethodOfTargetDTOFunction,
+                            BiConsumer<S, List<T>> setTargetDTOValueMethod,
+                            SafeFunction<S, Integer> getIdMethodOfSourceDTOFunction){
+    //步骤1
+    targetList+getMethod-->IdList
+    //步骤2
+    getSourceDTOList(idList)
+    //步骤3
+    any2any-->done
+  }
+
+  List<S> getSourceDTOList(List<Integer> idList);
+
+}
+
+于是ServiceA implements SetValuable<A>{
+
+    <T> void setAById(List<T> targetList, SafeFunction<T, Integer> getMethod, BiConsumer<PartsDTO, List<T>> setValueMethod){
+        doProcess(targetList,getMethod,setValueMethod,A::getIdMethod)
+    }
+
+  
+    @Override
+    List<A> getSourceDTOList(List<Integer> idList){
+        ...doSomeQueryHere...
+    }
+
+}
+
+ServiceB implements SetValuable<B>{
+
+    <T> void setAById(List<T> targetList, SafeFunction<T, Integer> getMethod, BiConsumer<PartsDTO, List<T>> setValueMethod){
+        doProcess(targetList,getMethod,setValueMethod,B::getIdMethod)
+    }
+
+  
+    @Override
+    List<B> getSourceDTOList(List<Integer> idList){
+        ...doSomeQueryHere...
+    }
+}
+
+经过我们这一番折腾
+我们service实现类的重复的代码也大大简化了
+以后所有的需要有setValue的操作只要继承SetValuable即可了
+
+就在你沾沾自喜的时候你又遇到了新的问题
+
+针对于一下的情况我们的改造方法出现了困难
+serviceA#setvalueById1
+serviceA#setvalueById2
+
+SetValuable接口中
+我们只定义了一种getSourceDTOList的方法。当时业务上还存在可能根据多种id去设置值的情况
+
+
+于是我们对比下困境。我们的难点在于无法提供多种的getSourceDTOList方法，这种情况我们把获取sourceDTOList的方法交给方法的调用方
+
+于是把SetValuable#doProcess的步骤2getSourceDTOList放到默认方法的参数去
+interface SetValuable<S>{
+  
+ 
+  default void doProcess<T> (List<T> targetList,
+                            SafeFunction<T, Integer> getIdMethodOfTargetDTOFunction,
+                            BiConsumer<S, List<T>> setTargetDTOValueMethod,
+                            SafeFunction<S, Integer> getIdMethodOfSourceDTOFunction){
+    //步骤1
+    targetList+getMethod-->IdList
+    //步骤2
+    getSourceDTOList(idList)
+    //步骤3
+    any2any-->done
+  }
+
+  List<S> getSourceDTOList(List<Integer> idList);
+
+}
+
+
+-->
+interface SetValuable2<S>{
+  
+ 
+  default void doProcess<T> (List<T> targetList,
+                            SafeFunction<T, Integer> getIdMethodOfTargetDTOFunction,
+                            BiConsumer<S, List<T>> setTargetDTOValueMethod,
+                            List<S> sourceList,
+                            SafeFunction<S, Integer> getIdMethodOfSourceDTOFunction){
+    //步骤1
+    targetList+getMethod-->IdList
+    //步骤2
+    any2any-->done
+  }
+
+}
+
+
+SetValuable2对比SetValuable，其实可以发现SetValuable是SetValuable2的一个实现。
+所以我们把SetValuable2作为一个父类起名为 MultipleSetValuable<S>
+
+最终版本的如下：
+
+
+public interface MultipleSetValuable<S> {
+
+    /**
+     *
+     * @param targetList 需要设置的List eg:List<ExternalPurchaseDTO> externalPurchaseDTOList
+     * @param getIdMethodOfTargetDTOFunction 从targetList获取用于查询的id eg:ExternalPurchaseDTO::getSupplierId
+     * @param setTargetDTOValueMethod targetList需要设置哪些值 （s,t）->t.foreach(p->{...})
+     * @param getIdMethodOfSourceDTOFunction 从sourceDTOList 获取id的方法 CustomerDTO::getCustomerId
+     * @param sourceDTOList 提供给接口实现方定制如何获取targetList的方法
+     * @param <T>
+     *@see com.baturu.customer.service.impl.CustomerContractServiceImpl#setCustomerContractInfoByContractId(List, SafeFunction, BiConsumer)
+     */
+    default <T> void setDataInfoById(List<T> targetList,
+                                     SafeFunction<T, Integer> getIdMethodOfTargetDTOFunction,
+                                     BiConsumer<S, List<T>> setTargetDTOValueMethod,
+                                     SafeFunction<S, Integer> getIdMethodOfSourceDTOFunction,
+                                     List<S> sourceDTOList) {
+        List<Integer> queryIdList = getTargetIdList(targetList, getIdMethodOfTargetDTOFunction);
+        if(CollectionUtils.isEmpty(queryIdList)||CollectionUtils.isEmpty(sourceDTOList)){
+            return;
+        }
+        Map<Integer, List<T>> Id2DTO = targetList.stream().collect(groupingBy(getIdMethodOfTargetDTOFunction));
+        WhosYourDaddy.anyToAny(sourceDTOList, getIdMethodOfSourceDTOFunction,Id2DTO, setTargetDTOValueMethod);
+    }
+
+    default <T> List<Integer> getTargetIdList(List<T> targetList,SafeFunction<T, Integer> getIdMethodOfTargetDTOFunction){
+        List<Integer> queryIdList = targetList.stream().map(getIdMethodOfTargetDTOFunction)
+                .filter(p-> Objects.nonNull(p))
+                .distinct().collect(toList());
+        return queryIdList;
+    }
+
+}
+
+
+public interface SetValuable<S>  extends MultipleSetValuable<S> {
+
+    /**
+     *
+     * @param targetList 需要设置的List eg:List<ExternalPurchaseDTO> externalPurchaseDTOList
+     * @param getIdMethodOfTargetDTOFunction 从targetList获取用于查询的id eg:ExternalPurchaseDTO::getSupplierId
+     * @param setTargetDTOValueMethod targetList需要设置哪些值 （s,t）->t.foreach(p->{...})
+     * 于targetList相关的东西都建议放出去给的调用方，sourceList放在service内部
+     * @param getIdMethodOfSourceDTOFunction 从sourceList查询用的id eg: UserDTO::getUserId
+     * @param <T>
+     * @see com.baturu.customer.service.impl.CustomerServiceImpl#setCustomerInfoByCustomerId(List, SafeFunction, BiConsumer)
+     */
+    default  <T> void setDataInfoById(List<T> targetList,
+                                            SafeFunction<T, Integer> getIdMethodOfTargetDTOFunction,
+                                            BiConsumer<S, List<T>> setTargetDTOValueMethod,
+                                            SafeFunction<S, Integer> getIdMethodOfSourceDTOFunction
+                                            ) {
+        List<Integer> targetIdList = getTargetIdList(targetList, getIdMethodOfTargetDTOFunction);
+        if(CollectionUtils.isNotEmpty(targetIdList)){
+            List<S> sourceDTOListByIdList = getSourceDTOListByIdList(targetIdList);
+            this.setDataInfoById(targetList,getIdMethodOfTargetDTOFunction,setTargetDTOValueMethod,getIdMethodOfSourceDTOFunction,sourceDTOListByIdList);
+        }
+    }
+
+    /**
+     * 需要实现着此提供一个根据idList查找DTOList的方法
+     * @param idList
+     * @return
+     */
+    List<S> getSourceDTOListByIdList(@NotNull List<Integer> idList);
+
+
+}
+
+
+总结：
+
+通过这次消除重复代码的经历，我们再次认识到函数式编程的方便之处，同时对于抽象接口的定义，接口默认方法的使用也更加了解，
+以后写代码的时候要多思考多总结！！
+
+简洁不能理解为代码量少，而是随着逻辑的复杂，需求的更改，代码可依然能保持极强的阅读性
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
